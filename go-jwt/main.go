@@ -5,98 +5,121 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
 	"github.com/golang-jwt/jwt"
 	"github.com/gorilla/mux"
 )
-//sha256
-var secretKey = [] byte("061eccbea6a1eb6d3b36aa7c820aa69cb0139bf95ebb5923e34b3e75f4353efb")
+
+// sha256sum
+var secretKey = []byte("061eccbea6a1eb6d3b36aa7c820aa69cb0139bf95ebb5923e34b3e75f4353efb")
 
 type User struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 }
 
-func createToken(username string) (string ,error){
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256,jwt.MapClaims{
-		
-		"username": username,
-		"expires": time.Now().Add(time.Hour * 24).Unix(),
-	})
-	tokenString, err:=token.SignedString(secretKey)
-	if err != nil {
-		return "", err
-	}
-	return tokenString, nil
+// Add a custom claims struct for better type safety
+type Claims struct {
+	Username string `json:"username"`
+	jwt.StandardClaims
 }
 
-func verifyToken(tokenString string) error {
-	token,err := jwt.Parse(tokenString,func(token *jwt.Token) (interface{},error){
+func createToken(username string) (string, error) {
+	// Use structured claims with expiration
+	claims := &Claims{
+		Username: username,
+		StandardClaims: jwt.StandardClaims{
+			ExpiresAt: time.Now().Add(time.Hour * 24).Unix(),
+			IssuedAt:  time.Now().Unix(),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(secretKey)
+}
+
+func verifyToken(tokenString string) (*Claims, error) {
+	claims := &Claims{}
+
+	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		// Verify signing method
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
 		return secretKey, nil
 	})
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	if !token.Valid{
-		return fmt.Errorf("invalid token")
+	if !token.Valid {
+		return nil, fmt.Errorf("invalid token")
 	}
-	return nil
+
+	return claims, nil
 }
 
 func LoginHandler(w http.ResponseWriter, r *http.Request) {
-
-	w.Header().Set("Content-Type","application/json")
 	var u User
-	json.NewDecoder(r.Body).Decode(&u)
-	fmt.Printf("The user request value %v\n",u)
+	if err := json.NewDecoder(r.Body).Decode(&u); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
 
-	if u.Username == "root" && u.Password == "123456"{
-		tokenString ,err := createToken(u.Username)
-		if err != nil{
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Errorf("No username found")
+	// TODO: In production, use secure password comparison
+	if u.Username == "root" && u.Password == "123456" {
+		tokenString, err := createToken(u.Username)
+		if err != nil {
+			http.Error(w, "Error creating token", http.StatusInternalServerError)
+			return
 		}
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(tokenString))
+
+		json.NewEncoder(w).Encode(map[string]string{
+			"token": tokenString,
+		})
 		return
-	}else{
-		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Errorf("invalid credentials")
 	}
+
+	http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 }
 
-func ProtectHandler(w http.ResponseWriter, r *http.Request){
-	w.Header().Set("Content-Type","application/json")
+func ProtectHandler(w http.ResponseWriter, r *http.Request) {
 	tokenString := r.Header.Get("Authorization")
-	if tokenString == ""{
-		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Errorf("No token found")
+	if tokenString == "" {
+		http.Error(w, "No token provided", http.StatusUnauthorized)
 		return
 	}
-	tokenString = tokenString[len("Bearer "):]
 
-	err :=verifyToken(tokenString)
+	// Check Bearer prefix
+	if len(tokenString) < 7 || tokenString[:7] != "Bearer " {
+		http.Error(w, "Invalid token format", http.StatusUnauthorized)
+		return
+	}
+
+	tokenString = tokenString[7:]
+	claims, err := verifyToken(tokenString)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprintf(w,"Invalid token")
+		http.Error(w, "Invalid token", http.StatusUnauthorized)
 		return
-
 	}
 
-	fmt.Fprint(w,"Protected endpoint")
+	// Return protected data
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message":  "Protected resource accessed successfully",
+		"username": claims.Username,
+	})
 }
 
-func main(){
+func main() {
 
 	router := mux.NewRouter()
-
-	router.HandleFunc("/login",LoginHandler).Methods("POST")
-	router.HandleFunc("/protected",ProtectHandler).Methods("GET")
+	router.HandleFunc("/login", LoginHandler).Methods("POST")
+	router.HandleFunc("/protected", ProtectHandler).Methods("GET")
 
 	fmt.Println("Starting the server")
 
-	err := http.ListenAndServe("localhost:8000",router)
+	err := http.ListenAndServe("localhost:8000", router)
 	if err != nil {
 		fmt.Println("Server failed to start")
 	}
